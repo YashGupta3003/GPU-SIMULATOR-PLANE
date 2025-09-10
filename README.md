@@ -1,4 +1,4 @@
-# Phase 1 — GPU Telemetry Logger + Flask API
+# Scheduler Duration Logger + Flask API
 
 This is the foundation for your AI GPU Control Plane project. It continuously logs GPU metrics
 (using NVML if available, otherwise simulated metrics) into SQLite and exposes a simple Flask API
