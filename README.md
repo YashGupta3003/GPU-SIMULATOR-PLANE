@@ -1,13 +1,10 @@
 # Scheduler Duration Logger + Flask API
 
-This is the foundation for your AI GPU Control Plane project. It continuously logs GPU metrics
-(using NVML if available, otherwise simulated metrics) into SQLite and exposes a simple Flask API
-that the dashboard will use later.
+This is the foundation for your AI GPU Control Plane project. It continuously logs duration,qtable metrics into SQLite and exposes a simple Flask API that the dashboard uses.
 
 ## Files
-- `app.py` — Flask app + background telemetry logger + SQLite persistence
-- `requirements.txt` — Python dependencies (installs NVML bindings)
-- `telemetry.db` — created at runtime
+- `app.py` — Flask app + SQLite persistence
+- `requirements.txt` — Python dependencies
 
 ## Run Locally
 ```bash
