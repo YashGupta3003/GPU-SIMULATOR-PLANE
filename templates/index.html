@@ -1,0 +1,221 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>GPU Control Plane — Simulator Dashboard</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<style>
+    body { font-family: system-ui, sans-serif; background:#0f172a; color:#e6eef8; margin:20px }
+    .card { background:#1e293b; padding:12px; border-radius:8px; margin-bottom:12px }
+    .row { display:flex; gap:12px }
+    .col { flex:1 }
+    table { width:100%; border-collapse: collapse; text-align:center }
+    th, td { padding:6px; border:1px solid rgba(255,255,255,0.12); }
+    button { padding:8px 12px; border:none; border-radius:6px; background:#2563eb; color:white; cursor:pointer }
+    input, select { padding:6px; border-radius:4px; border:1px solid #475569; background:#1e293b; color:white }
+    .small { font-size:0.9rem; color:#cbd5e1 }
+</style>
+</head>
+<body>
+<h2>GPU Control Plane — Simulator Dashboard</h2>
+
+<div class="card">
+    <label>Batch size (#jobs):</label>
+    <input id="batchJobs" type="number" value="4" min="1" />
+    <button onclick="makeInputs()">Create Batch</button>
+    <div id="jobInputs" style="display:inline-block; margin-left:8px"></div>
+    <button onclick="runBatch()">Run Batch (Sequentially Across All Schedulers)</button>
+    <span class="small" style="margin-left:12px">
+        Runs the same job batch under each scheduler sequentially (Random, RR, FCFS, Q-learning).
+    </span>
+</div>
+
+<div class="row">
+    <div class="col card">
+        <h3>GPU Utilization</h3>
+        <canvas id="utilChart" height="140"></canvas>
+    </div>
+    <div class="col card">
+        <h3>GPU Temperature</h3>
+        <canvas id="tempChart" height="140"></canvas>
+    </div>
+    <div class="col card">
+        <h3>Batch Makespan (sequential runs, per scheduler)</h3>
+        <canvas id="batchPerfChart" height="140"></canvas>
+        <div class="small">
+            Each group ID = one workload, run under all schedulers sequentially.
+            Y = total batch completion time (makespan).
+        </div>
+    </div>
+</div>
+
+<div class="card">
+    <h3>Busy GPUs</h3>
+    <table>
+    <thead>
+        <tr>
+            <th>GPU</th>
+            <th>Busy</th>
+            <th>Remaining (s)</th>
+            <th>Window Util %</th>
+            <th>Throughput</th>
+            <th>Running Job IDs</th>
+            <th>Queued Job IDs</th>
+        </tr>
+    </thead>
+    <tbody id="busyTable"></tbody>
+    </table>
+</div>
+
+<div class="card">
+    <h3>Recent Jobs</h3>
+    <table>
+    <thead><tr><th>ID</th><th>Size</th><th>GPU</th><th>Scheduler</th><th>Status</th><th>Duration</th><th>Batch ID</th></tr></thead>
+    <tbody id="jobsTable"></tbody>
+    </table>
+</div>
+
+<div class="card">
+    <h3>Q-Learning Q-Table</h3>
+    <table>
+    <thead><tr><th>State</th><th>GPU</th><th>Value</th></tr></thead>
+    <tbody id="qTableBody"></tbody>
+    </table>
+</div>
+
+<script>
+let numGPUs = {{ num_gpus }};
+let utilChart, tempChart, batchPerfChart;
+let utilSeries = {}, tempSeries = {};
+let tick = 0;
+
+// scheduler order must match backend
+const schedulerOrder = ['random', 'rr', 'fcfs', 'qlearn'];
+const offsets = {'random': -0.3, 'rr': -0.1, 'fcfs': 0.1, 'qlearn': 0.3};
+
+function initCharts(){
+    utilChart = new Chart(document.getElementById('utilChart'), {
+        type:'line', data:{datasets:[]},
+        options:{scales:{x:{type:'linear', ticks:{display:false}}, y:{min:0,max:100}}}
+    });
+    tempChart = new Chart(document.getElementById('tempChart'), {
+        type:'line', data:{datasets:[]},
+        options:{scales:{x:{type:'linear', ticks:{display:false}}, y:{min:20,max:100}}}
+    });
+    batchPerfChart = new Chart(document.getElementById('batchPerfChart'), {
+        type:'scatter',
+        data: { datasets: [] },
+        options: {
+            scales: {
+                x: { title: { display: true, text: "Batch Group ID (same workload)" }, beginAtZero: true },
+                y: { title: { display: true, text: "Makespan (s)" }, beginAtZero: true }
+            },
+            plugins: {
+                tooltip: {
+                    callbacks: {
+                        label: function(ctx) {
+                            const d = ctx.raw;
+                            return `${ctx.dataset.label}: ${d.y.toFixed(2)}s (Group ${d.raw_group}, Batch ${d.batch_id})`;
+                        }
+                    }
+                }
+            }
+        }
+    });
+}
+
+function makeInputs(){
+    let n = parseInt(document.getElementById('batchJobs').value);
+    let div = document.getElementById('jobInputs');
+    div.innerHTML = "";
+    for(let i=0;i<n;i++){
+        div.innerHTML += `<input type='number' class='jobSize' value='800' style='width:80px;margin:4px'/>`;
+    }
+}
+
+async function runBatch(){
+    let sizes = Array.from(document.getElementsByClassName('jobSize')).map(i=>parseInt(i.value));
+    if (sizes.length === 0) {
+        alert("Create a batch first (click Create Batch).");
+        return;
+    }
+    await fetch('/run_batch',{method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({sizes})});
+}
+
+async function refresh(){
+    tick++;
+
+    // Jobs
+    let jobs = await fetch('/jobs').then(r=>r.json());
+    let tbody = document.getElementById('jobsTable');
+    tbody.innerHTML = "";
+    jobs.forEach(j=>{
+        tbody.innerHTML += `<tr><td>${j.id}</td><td>${j.size}</td><td>${j.gpu_index}</td><td>${j.scheduler}</td><td>${j.status}</td><td>${j.duration?j.duration.toFixed(2):''}</td><td>${j.batch_id}</td></tr>`;
+    });
+
+    // Batch performance
+    let batchPerf = await fetch('/batch_performance').then(r=>r.json());
+    let grouped = {};
+    batchPerf.data.forEach(row=>{
+        const sched = row.scheduler;
+        const g = row.group_id ?? row.id;
+        const offset = offsets[sched] || 0;
+        const x = g + offset;
+        if(!grouped[sched]) grouped[sched] = [];
+        grouped[sched].push({x: x, y: row.batch_time, raw_group: g, batch_id: row.id});
+    });
+
+    batchPerfChart.data.datasets = schedulerOrder.filter(s=>grouped[s]).map(sched => ({
+        label: sched,
+        data: grouped[sched],
+        showLine: false,
+        pointRadius: 6
+    }));
+    batchPerfChart.update();
+
+    // Q-table
+    let qtab = await fetch('/qtable').then(r=>r.json());
+    let qtbody = document.getElementById('qTableBody');
+    qtbody.innerHTML = "";
+    qtab.data.forEach(r=>{
+        qtbody.innerHTML += `<tr><td>${r.state}</td><td>${r.action}</td><td>${r.value.toFixed(3)}</td></tr>`;
+    });
+
+    // metrics
+    let metrics = await fetch('/metrics/latest').then(r=>r.json());
+    metrics.data.forEach(d=>{
+        if(!(d.gpu_index in utilSeries)) utilSeries[d.gpu_index]=[];
+        if(!(d.gpu_index in tempSeries)) tempSeries[d.gpu_index]=[];
+        utilSeries[d.gpu_index].push({x:tick,y:d.utilization});
+        tempSeries[d.gpu_index].push({x:tick,y:d.temperature_c});
+        if(utilSeries[d.gpu_index].length>60) utilSeries[d.gpu_index].shift();
+        if(tempSeries[d.gpu_index].length>60) tempSeries[d.gpu_index].shift();
+    });
+    utilChart.data.datasets = Object.keys(utilSeries).map(k=>({label:'GPU'+k, data:utilSeries[k], borderWidth:2, pointRadius:0}));
+    tempChart.data.datasets = Object.keys(tempSeries).map(k=>({label:'GPU'+k, data:tempSeries[k], borderWidth:2, pointRadius:0}));
+    utilChart.update(); tempChart.update();
+
+    // busy table
+    let thr = await fetch('/throughputs').then(r=>r.json());
+    let busy = await fetch('/busy').then(r=>r.json());
+    let bBody = document.getElementById('busyTable');
+    bBody.innerHTML = "";
+    busy.data.forEach(d=>{
+        let throughput = thr.data[d.gpu_index] ?? "-";
+        bBody.innerHTML += `<tr>
+            <td>GPU ${d.gpu_index}</td>
+            <td>${d.busy?'Yes':'No'}</td>
+            <td>${d.remaining_sec.toFixed(2)}</td>
+            <td>${d.window_util_percent.toFixed(0)}</td>
+            <td>${throughput}</td>
+            <td>${d.running_jobs.join(', ')}</td>
+            <td>${d.queued_jobs.join(', ')}</td>
+        </tr>`;
+    });
+}
+
+initCharts();
+setInterval(refresh, 1500);
+</script>
+</body>
+</html>
